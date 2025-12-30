@@ -160,7 +160,7 @@ def load_model_with_ants(xml_path, ant_positions, ant_radius):
 def main():
     xml_path = "env.xml"
     
-    ANT_COUNT = 20      
+    ANT_COUNT = 6      
     ANT_RADIUS = 0.04   
 
     print(f"Extracting geometry from {xml_path}...")
@@ -226,6 +226,85 @@ def main():
                     model.site_rgba[site_id] = color_informed
                 elif state == 2:
                     model.site_rgba[site_id] = color_uninformed
+
+            # =========================================================
+            # VISUALIZATION LOGIC STARTS HERE
+            # =========================================================
+            
+            # 1. Reset the user scene geometries for this frame
+            viewer.user_scn.ngeom = 0
+
+            def add_arrow(pos, vector, color, scale=1.0, radius=0.02):
+                # If the vector is zero length, don't draw it
+                norm = np.linalg.norm(vector)
+                if norm < 1e-6:
+                    return
+
+                # Ensure we don't exceed the maximum number of geoms allowed
+                if viewer.user_scn.ngeom >= viewer.user_scn.maxgeom:
+                    return
+
+                # --- NUMPY REPLACEMENT FOR mju_matFromZAxis ---
+                def get_z_alignment_matrix(target_vec):
+                    # Normalize the target vector (this becomes our new Z-axis)
+                    z_new = target_vec / np.linalg.norm(target_vec)
+                    
+                    # Pick an arbitrary reference vector to calculate X
+                    # If z_new is close to global Z (0,0,1), use Y (0,1,0) as reference
+                    if abs(z_new[2]) < 0.99:
+                        ref = np.array([0.0, 0.0, 1.0])
+                    else:
+                        ref = np.array([0.0, 1.0, 0.0])
+                    
+                    # Calculate new X-axis (cross product of reference and new Z)
+                    x_new = np.cross(ref, z_new)
+                    x_new /= np.linalg.norm(x_new)
+                    
+                    # Calculate new Y-axis (cross product of new Z and new X)
+                    y_new = np.cross(z_new, x_new)
+                    y_new /= np.linalg.norm(y_new)
+                    
+                    # Construct the 3x3 rotation matrix (columns are X, Y, Z)
+                    mat = np.column_stack((x_new, y_new, z_new))
+                    return mat.flatten()
+                # -----------------------------------------------
+
+                # Initialize a new geom in the scene
+                mujoco.mjv_initGeom(
+                    viewer.user_scn.geoms[viewer.user_scn.ngeom],
+                    type=mujoco.mjtGeom.mjGEOM_ARROW,
+                    size=[radius, radius, norm * scale], # radius, radius, length
+                    pos=pos,
+                    mat=get_z_alignment_matrix(vector), # <--- Use the NumPy helper here
+                    rgba=color
+                )
+                
+                # Increment geom counter
+                viewer.user_scn.ngeom += 1
+
+            # 2. Visualize Target Direction (Green Arrow)
+            # Originating from the center of the load (body_id)
+            load_pos = data.xpos[body_id]
+            add_arrow(pos=load_pos, vector=target_dir, color=[0, 1, 0, 1], scale=2.0, radius=0.05)
+
+            # 3. Visualize Individual Ant Forces (Red Arrows)
+            # We need the global position of each ant to place the arrow correctly
+            # lever_arms_global is the vector from Load Center -> Ant
+            ant_global_positions = load_pos + lever_arms_global
+
+            for i in range(ANT_COUNT):
+                # Scale factor: 0.1 makes the arrow length manageable if forces are high (in Newtons)
+                add_arrow(
+                    pos=ant_global_positions[i], 
+                    vector=forces_global[i], 
+                    color=[1, 0, 0, 1], 
+                    scale=0.1, 
+                    radius=0.01
+                )
+
+            # =========================================================
+            # VISUALIZATION LOGIC ENDS HERE
+            # =========================================================
 
             mujoco.mj_step(model, data)
             viewer.sync()
