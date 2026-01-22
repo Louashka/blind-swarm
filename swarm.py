@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 class Load:
     def __init__(self) -> None:
@@ -39,7 +40,7 @@ class AntSwarm:
         self.k_c = 1.0          # Basal role-switching rate
         self.k_off = 0.015      # Rate: Uninformed -> Empty
         self.k_orient = 0.7     # Reorientation rate
-        self.f_0 = 2.8          # Force magnitude
+        self.f_0 = 0.5          # Force magnitude
         self.F_ind = 10 * self.f_0  # Individuality parameter
         self.phi_max = np.deg2rad(52) # Angular limit
 
@@ -47,6 +48,9 @@ class AntSwarm:
         self.gamma_rot_per_ant = 1.44
 
         self.load = Load()
+        
+        self.event_timer_started = False
+        self.start_time = time.perf_counter()
 
     @property
     def empty(self) -> np.ndarray:
@@ -221,20 +225,32 @@ class AntSwarm:
         # 1. Update Physics-based values
         self.calculate_f_loc(load_velocity_global, load_angular_vel, load_rotation_matrix)
         
-        self.time_accumulator += dt
+        # self.time_accumulator += dt
         
         # 2. Gillespie Loop
         while True:
             self.calculate_propensities()
-            
-            if self.R_tot <= 1e-9:
-                self.time_to_next_event = float('inf')
-            else:
-                r_1 = np.random.rand()
-                self.time_to_next_event = (1.0 / self.R_tot) * np.log(1.0 / r_1)
+
+            if not self.event_timer_started:
+                if self.R_tot <= 1e-9:
+                    self.time_to_next_event = float('inf')
+                    print("ok")
+                else:
+                    r_1 = np.random.rand()
+                    self.time_to_next_event = (1.0 / self.R_tot) * np.log(1.0 / r_1)
+
+                self.event_timer_started = True
+                self.start_time = time.perf_counter()
+
+            self.time_accumulator = time.perf_counter() - self.start_time
+            print(self.time_accumulator)
                 
-            if self.time_accumulator >= self.time_to_next_event:
-                self.time_accumulator -= self.time_to_next_event
+            if self.event_timer_started and self.time_accumulator >= self.time_to_next_event:
+                self.event_timer_started = False
+
+                print()
+                print(self.time_to_next_event)
+                print()
                 
                 r_2 = np.random.rand()
                 
@@ -267,13 +283,13 @@ class AntSwarm:
                             
                 elif r_2 < thresh_switch:
                     # Role Switching
-                    self._execute_switch_event()
+                    # self._execute_switch_event()
 
-                    # idx = np.random.choice(self.uninformed)
-                    # if self.states[idx] == 2:
-                    #     self.states[idx] = 3
-                    # else:
-                    #     self.states[idx] = 2
+                    idx = np.random.choice(self.uninformed)
+                    if self.states[idx] == 2:
+                        self.states[idx] = 3
+                    else:
+                        self.states[idx] = 2
                     
                 elif r_2 < thresh_det:
                     # Detachment
