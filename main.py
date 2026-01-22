@@ -151,8 +151,8 @@ def load_model_with_ants(xml_path, ant_positions, ant_radius):
 def main():
     xml_path = "env.xml"
     
-    ANT_COUNT = 50      
-    ANT_RADIUS = 0.04   
+    ANT_COUNT = 40      
+    ANT_RADIUS = 0.02   
 
     print(f"Extracting geometry from {xml_path}...")
     
@@ -183,9 +183,10 @@ def main():
     target_dir = np.array([1.0, 0.0, 0.0]) 
     
     # Visualization colors
-    color_detached = np.array([0.5, 0.5, 0.5, 0.3]) # Grey/Transparent
-    color_puller = np.array([0.8, 0.1, 0.1, 1.0])   # Red
-    color_lifter = np.array([0.1, 0.1, 0.8, 1.0])   # Blue
+    color_detached = np.array([0.5, 0.5, 0.5, 0.3])     # Grey/Transparent
+    color_informed = np.array([0.8, 0.1, 0.1, 1.0])     # Red
+    color_puller = np.array([0.1, 0.1, 0.8, 1.0])       # Blue
+    color_lifter = np.array([0.1, 0.8, 0.1, 1.0])
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
@@ -233,8 +234,10 @@ def main():
                 if state == 0:
                     model.site_rgba[site_id] = color_detached
                 elif state == 1:
-                    model.site_rgba[site_id] = color_puller
+                    model.site_rgba[site_id] = color_informed
                 elif state == 2:
+                    model.site_rgba[site_id] = color_puller
+                elif state == 3:
                     model.site_rgba[site_id] = color_lifter
 
             # =========================================================
@@ -273,7 +276,7 @@ def main():
 
             # Visualize Target
             load_pos = data.xpos[body_id]
-            add_arrow(pos=load_pos, vector=target_dir, color=[0, 1, 0, 1], scale=1.0, radius=0.05)
+            # add_arrow(pos=load_pos, vector=target_dir, color=[0, 1, 0, 1], scale=1.0, radius=0.03)
 
             # Visualize Ant Forces
             # We scale the visualization up because ant forces are usually small
@@ -287,8 +290,8 @@ def main():
                         pos=ant_global_positions[i], 
                         vector=forces_global[i], 
                         color=[1, 0, 0, 1], 
-                        scale=FORCE_VIS_SCALE, 
-                        radius=0.01
+                        scale=0.8, 
+                        radius=0.008
                     )
 
             mujoco.mj_step(model, data)

@@ -1,5 +1,10 @@
 import numpy as np
 
+class Load:
+    def __init__(self) -> None:
+        self.linear_damping = 0
+        self.angular_damping = 0
+
 class AntSwarm:
     def __init__(self, num_sites, attachment_sites_local_pos):
         """
@@ -37,10 +42,11 @@ class AntSwarm:
         self.f_0 = 2.8          # Force magnitude
         self.F_ind = 10 * self.f_0  # Individuality parameter
         self.phi_max = np.deg2rad(52) # Angular limit
-        
-        # Damping coefficients (Microscopic)
-        self.gamma_per_ant = 1.48 * self.f_0 # approx value from table
-        self.N_0 = num_sites # Threshold for max damping (simplified)
+
+        self.gamma_per_ant = 1.48 
+        self.gamma_rot_per_ant = 1.44
+
+        self.load = Load()
 
     @property
     def empty(self) -> np.ndarray:
@@ -74,8 +80,12 @@ class AntSwarm:
         # 1. Calculate macroscopic gamma based on N_att (Eq. 3)
         N_att = np.count_nonzero(self.states)
         # If N_att is low, friction is high (simulating load touching ground)
-        effective_N = self.num_sites if N_att <= (self.num_sites / 5) else N_att
-        gamma = self.gamma_per_ant * effective_N
+        if N_att <= self.num_sites / 5:
+            self.load.linear_damping = self.gamma_per_ant * self.num_sites
+            self.load.angular_damping = self.gamma_rot_per_ant * self.num_sites
+        else:
+            self.load.linear_damping = self.gamma_per_ant * N_att
+            self.load.angular_damping = self.gamma_rot_per_ant * N_att
 
         # 2. Calculate local velocities in Global Frame
         # r_i_global = R * r_i_local
@@ -91,7 +101,7 @@ class AntSwarm:
         v_loc = load_linear_vel + v_rot
         
         # 3. f_loc = gamma * v_loc
-        self.f_loc = gamma * v_loc
+        self.f_loc = self.load.linear_damping * v_loc
 
     def calculate_propensities(self):
         """
@@ -258,6 +268,12 @@ class AntSwarm:
                 elif r_2 < thresh_switch:
                     # Role Switching
                     self._execute_switch_event()
+
+                    # idx = np.random.choice(self.uninformed)
+                    # if self.states[idx] == 2:
+                    #     self.states[idx] = 3
+                    # else:
+                    #     self.states[idx] = 2
                     
                 elif r_2 < thresh_det:
                     # Detachment

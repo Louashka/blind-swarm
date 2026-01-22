@@ -20,15 +20,15 @@
     <!-- =================================================================================== -->
     <!-- WALLS (The Puzzle) -->
     <!-- =================================================================================== -->
-    <body name="puzzle_walls" pos="0 0 0.220">
-        <geom name="wall_left" type="box" pos="0 0 0" size="0.0145 0.975 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_back" type="box" pos="1.6185 -0.9605 0" size="1.604 0.0145 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_front" type="box" pos="1.6185 0.9605 0" size="1.604 0.0145 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_slit1_bottom" type="box" pos="1.2920 -0.5725 0" size="0.0145 0.388 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_slit1_top" type="box" pos="1.2920 0.5725 0" size="0.0145 0.388 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_slit2_bottom" type="box" pos="1.9160 -0.5725 0" size="0.0145 0.388 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_slit2_top" type="box" pos="1.9160 0.5725 0" size="0.0145 0.388 0.220" rgba="0.7 0.7 0.7 1"/>
-        <geom name="wall_right" type="box" pos="3.208 0 0" size="0.0145 0.975 0.220" rgba="0.7 0.7 0.7 1"/>
+    <body name="puzzle_walls" pos="0 0 0.0220">
+        <geom name="wall_left" type="box" pos="0 0 0" size="0.00145 0.0975 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_back" type="box" pos="0.16185 -0.09605 0" size="0.1604 0.00145 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_front" type="box" pos="0.16185 0.09605 0" size="0.1604 0.00145 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_slit1_bottom" type="box" pos="0.12920 -0.05725 0" size="0.00145 0.0388 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_slit1_top" type="box" pos="0.12920 0.05725 0" size="0.00145 0.0388 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_slit2_bottom" type="box" pos="0.19160 -0.05725 0" size="0.00145 0.0388 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_slit2_top" type="box" pos="0.19160 0.05725 0" size="0.00145 0.0388 0.0220" rgba="0.7 0.7 0.7 1"/>
+        <geom name="wall_right" type="box" pos="0.3208 0 0" size="0.00145 0.0975 0.0220" rgba="0.7 0.7 0.7 1"/>
     </body>
 
 
@@ -36,24 +36,24 @@
     <!-- THE T-SHAPED LOAD - Based on Table S1 "small ant (exp)" dimensions     -->
     <!-- All dimensions from cm -> m.                                           -->
     <!-- ====================================================================== -->
-    <body name="load" pos="0.65 0 0.0295">
+    <body name="load" pos="0.065 0 0.00295">
       <!-- 
         PLANAR JOINTS: These restrict movement to 2D (x, y, z-rotation).
         DAMPING IS REMOVED. We will apply damping forces manually in python
         to match the paper's model (Eq. 3).
       -->
-      <joint name="slide_x" type="slide" axis="1 0 0" damping="5.0"/>
-      <joint name="slide_y" type="slide" axis="0 1 0" damping="5.0"/>
-      <joint name="hinge_z" type="hinge" axis="0 0 1" damping="5.0"/>
+      <joint name="slide_x" type="slide" axis="1 0 0" damping="100.0"/>
+      <joint name="slide_y" type="slide" axis="0 1 0" damping="100.0"/>
+      <joint name="hinge_z" type="hinge" axis="0 0 1" damping="100.0"/>
 
       <!-- The T-Shape Geometry (using half-extents for 'size') -->
-      <geom name="main_bar" type="box" size="0.4205 0.0295 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
+      <geom name="main_bar" type="box" size="0.04205 0.00295 0.00295" rgba="0.8 0.2 0.2 1" density="1000"/>
       <!-- long crossbar: length=0.58, width=0.09. size = [0.29, 0.045, 0.05] -->
-      <geom name="long_bar" type="box" pos="-0.4205 0 0" size="0.0295 0.2295 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
+      <geom name="long_bar" type="box" pos="-0.04205 0 0" size="0.00295 0.02295 0.00295" rgba="0.8 0.2 0.2 1" density="1000"/>
       
       <!-- short crossbar: length=0.29, width=0.09. size = [0.0045, 0.0145, 0.01] -->
       <!-- Positioned relative to the long_bar's center to form a T -->
-      <geom name="short_bar" type="box" pos="0.4205 0 0" size="0.0295 0.1095 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
+      <geom name="short_bar" type="box" pos="0.04205 0 0" size="0.00295 0.01095 0.00295" rgba="0.8 0.2 0.2 1" density="1000"/>
     </body>
   </worldbody>
 </mujoco>
