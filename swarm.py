@@ -1,5 +1,4 @@
 import numpy as np
-import time
 
 class Load:
     def __init__(self) -> None:
@@ -7,50 +6,44 @@ class Load:
         self.angular_damping = 0
 
 class AntSwarm:
-    def __init__(self, num_sites, attachment_sites_local_pos):
+    def __init__(self, num_sites, attachment_sites_local_pos, puzzle_geometry):
         """
         Ant Swarm Logic based on Gelblum et al.
         """
         self.num_sites = num_sites
-        # Shape (N, 3), assuming z=0 for planar physics
         self.sites_pos_local = np.array(attachment_sites_local_pos)
         
         # State: 0=Empty, 1=Informed Puller, 2=Uninformed Puller, 3=Uninformed Lifter
         self.states = np.zeros(num_sites, dtype=int) 
-        
-        # Orientations p_i (N, 3). 
-        # For Pullers (1, 2), this is the pulling direction.
-        # For Lifters/Empty, this value is ignored/irrelevant but kept for array shape.
         self.orientations = np.zeros((num_sites, 3))
         
-        # Initialize random orientations for start
         random_angles = np.random.uniform(0, 2*np.pi, num_sites)
         self.orientations[:, 0] = np.cos(random_angles)
         self.orientations[:, 1] = np.sin(random_angles)
 
-        # Local force signal f_loc (N, 3)
         self.f_loc = np.zeros((num_sites, 3))
 
-        # Time accumulation for Gillespie
+        # <<< CRITICAL FIX >>> Gillespie timer now uses simulation time, not wall-clock time
         self.time_accumulator = 0.0
+        self.time_to_next_event = 0.0
+        self.event_timer_started = False
+
+        # <<< CHANGED >>> Store puzzle geometry
+        self.puzzle_geometry = puzzle_geometry
 
         # Parameters (from Table S5)
-        self.k_on = 0.015       # Rate: Empty -> Informed
-        self.k_forget = 0.09    # Rate: Informed -> Uninformed
-        self.k_c = 1.0          # Basal role-switching rate
-        self.k_off = 0.015      # Rate: Uninformed -> Empty
-        self.k_orient = 0.7     # Reorientation rate
-        self.f_0 = 0.5          # Force magnitude
-        self.F_ind = 10 * self.f_0  # Individuality parameter
-        self.phi_max = np.deg2rad(52) # Angular limit
+        self.k_on = 0.015
+        self.k_forget = 0.09
+        self.k_c = 1.0
+        self.k_off = 0.015
+        self.k_orient = 0.7
+        self.f_0 = 0.5
+        self.F_ind = 10 * self.f_0
+        self.phi_max = np.deg2rad(52)
 
-        self.gamma_per_ant = 1.48 
+        self.gamma_per_ant = 1.48
         self.gamma_rot_per_ant = 1.44
-
         self.load = Load()
-        
-        self.event_timer_started = False
-        self.start_time = time.perf_counter()
 
     @property
     def empty(self) -> np.ndarray:
@@ -166,6 +159,7 @@ class AntSwarm:
             idx_in_subset = np.searchsorted(cumsum, r)
             global_idx = u_pullers[min(idx_in_subset, len(u_pullers)-1)]
             self.states[global_idx] = 3
+            is_puller = False
         else:
             # A lifter becomes a puller
             r -= sum_p2l
@@ -173,146 +167,120 @@ class AntSwarm:
             idx_in_subset = np.searchsorted(cumsum, r)
             global_idx = u_lifters[min(idx_in_subset, len(u_lifters)-1)]
             self.states[global_idx] = 2
+            is_puller = True
 
-    def reorient_ant(self, idx, target_dir_global, load_rotation_matrix):
+        return global_idx, is_puller
+
+    def reorient_ant(self, idx, load_rotation_matrix, ant_global_pos, ant_local_normal):
         """
         Updates orientation p_i for ant idx.
+        Implements chamber-based logic for informed pullers.
         """
         # 1. Determine Desired Direction
-        if self.states[idx] == 1: # Informed
-            desired_dir = target_dir_global
+        if self.states[idx] == 1: # Informed Puller
+            ant_x = ant_global_pos[0]
+            
+            # Check which chamber the ant is in based on its global X position
+            if ant_x < self.puzzle_geometry['chamber1_x_boundary']:
+                # Chamber 1: Pull towards slit 1 midpoint
+                target_pos = self.puzzle_geometry['slit1_midpoint']
+                desired_dir = target_pos - ant_global_pos
+            elif ant_x < self.puzzle_geometry['chamber2_x_boundary']:
+                # Chamber 2: Pull towards slit 2 midpoint
+                target_pos = self.puzzle_geometry['slit2_midpoint']
+                desired_dir = target_pos - ant_global_pos
+            else:
+                # Chamber 3: Pull along the global target direction (+x)
+                desired_dir = np.array([1.0, 0.0, 0.0]) 
+            
+            # Normalize the calculated direction
+            norm = np.linalg.norm(desired_dir)
+            if norm > 1e-6:
+                desired_dir = desired_dir / norm
+
         elif self.states[idx] == 2: # Uninformed Puller
             f_mag = np.linalg.norm(self.f_loc[idx])
             if f_mag > 1e-6:
                 desired_dir = self.f_loc[idx] / f_mag
             else:
-                desired_dir = self.orientations[idx]
+                return # No change if local force is zero
         else:
-            return 
+            return # Not a puller, no reorientation needed
 
         # 2. Calculate Local Normal in Global Frame
-        # Assuming local normal points radially outward from center of load?
-        # Or defined by geometry. Here assuming radial for simplicity:
-        # normal_local = normalized(pos_local)
-        pos_local = self.sites_pos_local[idx]
-        norm_local = pos_local / (np.linalg.norm(pos_local) + 1e-9)
-        normal_global = np.dot(load_rotation_matrix, norm_local)
+        normal_global = np.dot(load_rotation_matrix, ant_local_normal)
 
         # 3. Apply Angular Limit (phi_max)
-        # Project to 2D
         normal_2d = normal_global[:2]
         desired_2d = desired_dir[:2]
         
         theta_n = np.arctan2(normal_2d[1], normal_2d[0])
         theta_d = np.arctan2(desired_2d[1], desired_2d[0])
         
-        diff = theta_d - theta_n
-        diff = (diff + np.pi) % (2 * np.pi) - np.pi # Wrap -pi to pi
+        diff = (theta_d - theta_n + np.pi) % (2 * np.pi) - np.pi
         
-        if diff > self.phi_max:
-            final_angle = theta_n + self.phi_max
-        elif diff < -self.phi_max:
-            final_angle = theta_n - self.phi_max
-        else:
-            final_angle = theta_d
+        if diff > self.phi_max: final_angle = theta_n + self.phi_max
+        elif diff < -self.phi_max: final_angle = theta_n - self.phi_max
+        else: final_angle = theta_d
             
         self.orientations[idx] = np.array([np.cos(final_angle), np.sin(final_angle), 0])
 
-    def update_logic(self, dt, load_velocity_global, load_angular_vel, target_direction_global, load_rotation_matrix):
-        """
-        Main simulation step.
-        """
-        # 1. Update Physics-based values
+    def update_logic(self, dt, load_velocity_global, load_angular_vel, load_rotation_matrix, ant_global_positions, ant_local_normals):
         self.calculate_f_loc(load_velocity_global, load_angular_vel, load_rotation_matrix)
         
-        # self.time_accumulator += dt
+        # <<< CRITICAL FIX >>> Correct Gillespie timer logic
+        self.time_accumulator += dt
         
-        # 2. Gillespie Loop
-        while True:
+        # Process all events that should have occurred in the last time step
+        while self.time_accumulator >= self.time_to_next_event:
+            # Decrement accumulator by the time of the event we are processing
+            self.time_accumulator -= self.time_to_next_event
+            
             self.calculate_propensities()
-
-            if not self.event_timer_started:
-                if self.R_tot <= 1e-9:
-                    self.time_to_next_event = float('inf')
-                    print("ok")
-                else:
-                    r_1 = np.random.rand()
-                    self.time_to_next_event = (1.0 / self.R_tot) * np.log(1.0 / r_1)
-
-                self.event_timer_started = True
-                self.start_time = time.perf_counter()
-
-            self.time_accumulator = time.perf_counter() - self.start_time
-            print(self.time_accumulator)
-                
-            if self.event_timer_started and self.time_accumulator >= self.time_to_next_event:
-                self.event_timer_started = False
-
-                print()
-                print(self.time_to_next_event)
-                print()
-                
-                r_2 = np.random.rand()
-                
-                # Thresholds
-                thresh_att = self.R_att / self.R_tot
-                thresh_forget = (self.R_att + self.R_forget) / self.R_tot
-                thresh_switch = (self.R_att + self.R_forget + self.R_c) / self.R_tot
-                thresh_det = (self.R_att + self.R_forget + self.R_c + self.R_det) / self.R_tot
-                
-                if r_2 < thresh_att:
-                    # Attachment
-                    if len(self.empty) > 0:
-                        idx = np.random.choice(self.empty)
-                        self.states[idx] = 1 # Informed
-                        # Initialize orientation towards target immediately
-                        self.reorient_ant(idx, target_direction_global, load_rotation_matrix)
-                        
-                elif r_2 < thresh_forget:
-                    # Forgetting
-                    if len(self.informed) > 0:
-                        idx = np.random.choice(self.informed)
-                        # Decide Puller vs Lifter (Eq. 14)
-                        dot_val = np.dot(self.orientations[idx], self.f_loc[idx]) / self.F_ind
-                        prob_puller = 1.0 / (1.0 + np.exp(-2 * dot_val))
-                        
-                        if np.random.rand() < prob_puller:
-                            self.states[idx] = 2 # Uninformed Puller
-                        else:
-                            self.states[idx] = 3 # Lifter
-                            
-                elif r_2 < thresh_switch:
-                    # Role Switching
-                    # self._execute_switch_event()
-
-                    idx = np.random.choice(self.uninformed)
-                    if self.states[idx] == 2:
-                        self.states[idx] = 3
-                    else:
-                        self.states[idx] = 2
-                    
-                elif r_2 < thresh_det:
-                    # Detachment
-                    if len(self.uninformed) > 0:
-                        idx = np.random.choice(self.uninformed)
-                        self.states[idx] = 0 # Empty
-                        self.orientations[idx] = 0 # Reset orientation
-                        
-                else:
-                    # Reorientation
-                    candidates = self.pullers # Informed + Uninformed Pullers
-                    if len(candidates) > 0:
-                        idx = np.random.choice(candidates)
-                        self.reorient_ant(idx, target_direction_global, load_rotation_matrix)
-            else:
+            if self.R_tot <= 1e-9:
+                self.time_to_next_event = float('inf') # No events can happen
                 break
-        
-        # 3. Return forces to be applied to the physics engine
-        # Only pullers exert force f_0 in direction p_i
-        active_pullers = self.pullers
+
+            r_2 = np.random.rand() * self.R_tot
+            
+            if r_2 < self.R_att:
+                if len(self.empty) > 0:
+                    idx = np.random.choice(self.empty)
+                    self.states[idx] = 1 # Becomes Informed
+                    # <<< CHANGED >>> Pass the ant's global position for correct initial orientation
+                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], ant_local_normals[idx])
+            elif r_2 < self.R_att + self.R_forget:
+                if len(self.informed) > 0:
+                    idx = np.random.choice(self.informed)
+                    dot_val = np.dot(self.orientations[idx], self.f_loc[idx]) / self.F_ind
+                    prob_puller = 1.0 / (1.0 + np.exp(-2 * dot_val))
+                    self.states[idx] = 2 if np.random.rand() < prob_puller else 3
+            elif r_2 < self.R_att + self.R_forget + self.R_c:
+                if len(self.uninformed) > 0:
+                    # Simplified role switching logic from your code
+                    # idx = np.random.choice(self.uninformed)
+                    # self.states[idx] = 3 if self.states[idx] == 2 else 2
+                    _, _ = self._execute_switch_event()
+            elif r_2 < self.R_att + self.R_forget + self.R_c + self.R_det:
+                if len(self.uninformed) > 0:
+                    idx = np.random.choice(self.uninformed)
+                    self.states[idx] = 0
+                    self.orientations[idx] = 0
+            else:
+                if len(self.pullers) > 0:
+                    idx = np.random.choice(self.pullers)
+                    # <<< CHANGED >>> Pass the ant's global position for reorientation
+                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], ant_local_normals[idx])
+
+            # Calculate time until the *next* event
+            if self.R_tot > 1e-9:
+                self.time_to_next_event = -np.log(np.random.rand()) / self.R_tot
+            else:
+                self.time_to_next_event = float('inf')
+
+        # Return forces to be applied to the physics engine
         forces = np.zeros_like(self.orientations)
-        forces[active_pullers] = self.orientations[active_pullers] * self.f_0
-        
+        forces[self.pullers] = self.orientations[self.pullers] * self.f_0
         return forces
 
     

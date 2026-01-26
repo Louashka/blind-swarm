@@ -72,28 +72,98 @@ def get_contour_and_body_z(xml_path, body_name="load"):
     
     return corners, body_z
 
+def get_puzzle_geometry(xml_path, load_z_height):
+    """
+    Parses the XML to find the slit positions and chamber boundaries.
+    Returns a dictionary with the critical coordinates.
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    
+    puzzle_body = root.find(f".//body[@name='puzzle_walls']")
+    if puzzle_body is None:
+        raise ValueError("Body 'puzzle_walls' not found in XML.")
+        
+    puzzle_pos = np.array([float(v) for v in puzzle_body.get('pos', '0 0 0').split()])
+
+    # Find slit walls by name
+    slit1_wall = None
+    slit2_wall = None
+    
+    # Iterate through all geoms within the 'puzzle_walls' body
+    for geom in puzzle_body.findall('geom'):
+        geom_name = geom.get('name', '') # Use default to avoid error if name is missing
+        
+        # Find the first geom related to slit1
+        if 'slit1' in geom_name and slit1_wall is None:
+            slit1_wall = geom
+        
+        # Find the first geom related to slit2
+        if 'slit2' in geom_name and slit2_wall is None:
+            slit2_wall = geom
+            
+        # Optimization: stop if both have been found
+        if slit1_wall is not None and slit2_wall is not None:
+            break
+    
+    if slit1_wall is None or slit2_wall is None:
+        raise ValueError("Could not find 'slit1' or 'slit2' geoms in XML.")
+
+    # Slit position is defined by the wall's X-coordinate
+    slit1_pos_local = np.array([float(v) for v in slit1_wall.get('pos').split()])
+    slit2_pos_local = np.array([float(v) for v in slit2_wall.get('pos').split()])
+
+    # Global X-coordinates define chamber boundaries
+    chamber1_boundary_x = puzzle_pos[0] + slit1_pos_local[0]
+    chamber2_boundary_x = puzzle_pos[0] + slit2_pos_local[0]
+
+    # Slit midpoints are the targets for the ants
+    # We use the load's Z-height for the target Z for simplicity
+    slit1_midpoint = np.array([chamber1_boundary_x, 0, load_z_height])
+    slit2_midpoint = np.array([chamber2_boundary_x, 0, load_z_height])
+    
+    geometry = {
+        'chamber1_x_boundary': chamber1_boundary_x,
+        'chamber2_x_boundary': chamber2_boundary_x,
+        'slit1_midpoint': slit1_midpoint,
+        'slit2_midpoint': slit2_midpoint,
+    }
+    print("Parsed Puzzle Geometry:")
+    for key, val in geometry.items():
+        print(f"  - {key}: {val}")
+        
+    return geometry
+
 # --- 2. Helper: Generate Attachment Points ---
 def generate_perimeter_points(corners, num_ants, ant_radius, body_z):
     """
-    Generates positions around the contour.
+    Generates positions around the contour and their corresponding local normal vectors.
+    
+    Returns:
+        tuple: (np.array of points, np.array of normals)
     """
     points = []
+    normals = [] # We will store the normals here
     
     # Calculate local Z position relative to the body center
-    # If body is at 0.1, and ground is 0.0, relative Z is -0.1 + radius
     z_ground = -body_z + ant_radius 
     
+    # Ensure the corners form a closed loop for segment calculation
     closed_corners = np.vstack([corners, corners[0]])
     
-    # Calculate total perimeter length
+    # Calculate total perimeter length and individual segment lengths
     total_perimeter = 0
     segment_lengths = []
-    for i in range(len(closed_corners) - 1):
+    for i in range(len(corners)):
         p1 = closed_corners[i]
         p2 = closed_corners[i+1]
-        dist = np.linalg.norm(p2 - p1)
+        dist = np.linalg.norm(p2[:2] - p1[:2]) # Use 2D distance for perimeter
         segment_lengths.append(dist)
         total_perimeter += dist
+        
+    # Avoid division by zero if there's no perimeter
+    if total_perimeter < 1e-9:
+        return np.array([]), np.array([])
         
     step_dist = total_perimeter / num_ants
     
@@ -102,30 +172,44 @@ def generate_perimeter_points(corners, num_ants, ant_radius, body_z):
         
         accumulated_len = 0
         for seg_idx, seg_len in enumerate(segment_lengths):
+            # Check if the target distance falls within the current segment
             if accumulated_len + seg_len >= target_dist:
                 p1 = closed_corners[seg_idx]
                 p2 = closed_corners[seg_idx+1]
                 
+                # This is the direction vector of the edge
                 edge_vec = p2 - p1
                 
-                # Normal vector (outward facing)
-                normal = np.array([-edge_vec[1], edge_vec[0]])
-                norm_len = np.linalg.norm(normal)
-                if norm_len > 0:
-                    normal = normal / norm_len
+                # --- THIS IS THE KEY PART ---
+                # Calculate the 2D outward-facing normal vector from the 2D edge vector.
+                # Assumes corners are defined in Counter-Clockwise (CCW) order.
+                normal_2d = np.array([-edge_vec[1], edge_vec[0]])
+                norm_len = np.linalg.norm(normal_2d)
+                if norm_len > 1e-9:
+                    normal_2d = normal_2d / norm_len
                 
-                local_dist = target_dist - accumulated_len
-                ratio = local_dist / seg_len
+                # Store the 3D version of the normal (Z is 0 in local space)
+                normals.append([normal_2d[0], normal_2d[1], 0.0])
+                # --- END OF KEY PART ---
+                
+                # Find the position on the contour line itself
+                # Handle division by zero for zero-length segments
+                ratio = 0.0
+                if seg_len > 1e-9:
+                    local_dist = target_dist - accumulated_len
+                    ratio = local_dist / seg_len
                 
                 pos_on_line = p1 + edge_vec * ratio
-                final_pos = pos_on_line + (normal * ant_radius)
+                
+                # Calculate the final ant position, offset by the radius along the normal
+                final_pos = pos_on_line[:2] + (normal_2d * ant_radius)
                 
                 points.append([final_pos[0], final_pos[1], z_ground])
-                break
+                break # Move to the next ant
             else:
                 accumulated_len += seg_len
 
-    return np.array(points)
+    return np.array(points), np.array(normals)
 
 # --- 3. Helper: Inject Visualization Sites ---
 def load_model_with_ants(xml_path, ant_positions, ant_radius):
@@ -151,8 +235,8 @@ def load_model_with_ants(xml_path, ant_positions, ant_radius):
 def main():
     xml_path = "env.xml"
     
-    ANT_COUNT = 40      
-    ANT_RADIUS = 0.02   
+    ANT_COUNT = 50      
+    ANT_RADIUS = 0.015   
 
     print(f"Extracting geometry from {xml_path}...")
     
@@ -160,12 +244,13 @@ def main():
     try:
         raw_corners, body_z = get_contour_and_body_z(xml_path, body_name="load")
         print(f"Detected body 'load' at Z-height: {body_z}")
+        puzzle_geometry = get_puzzle_geometry(xml_path, load_z_height=body_z)
     except Exception as e:
         print(f"Error parsing XML geometry: {e}")
         return
 
     # 2. Generate Points
-    ant_local_pos = generate_perimeter_points(raw_corners, ANT_COUNT, ANT_RADIUS, body_z)
+    ant_local_pos, ant_normals_local = generate_perimeter_points(raw_corners, ANT_COUNT, ANT_RADIUS, body_z)
     print(f"Generated {len(ant_local_pos)} ants around the contour.")
     
     # 3. Load Model
@@ -174,7 +259,7 @@ def main():
     
     # 4. Initialize Swarm
     # Note: We pass the local positions to the swarm so it knows where ants are relative to center
-    swarm = AntSwarm(ANT_COUNT, ant_local_pos)
+    swarm = AntSwarm(ANT_COUNT, ant_local_pos, puzzle_geometry)
     
     # 5. Simulation Loop Setup
     body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "load")
@@ -189,16 +274,40 @@ def main():
     color_lifter = np.array([0.1, 0.8, 0.1, 1.0])
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
+        # 1. Set the lookat point to the center of the scene
+        viewer.cam.lookat[0] = 1.5  # x
+        viewer.cam.lookat[1] = 0.0  # y
+        viewer.cam.lookat[2] = 0.0  # z
+
+        # 2. Set the distance (height) of the camera
+        viewer.cam.distance = 4.0
+
+        # 3. Set the azimuth (horizontal rotation)
+        viewer.cam.azimuth = 90.0  # Rotate so +X is to the right
+
+        # 4. Set the elevation (vertical angle) to look straight down
+        viewer.cam.elevation = -90.0
+
+        print("\nViewer launched. Pausing for 5 seconds to allow you to resize the window.")
+
+        time.sleep(5) 
+
+        print("Resuming simulation...\n")
+
         while viewer.is_running():
             step_start = time.time()
             
             # --- Get Physical State from MuJoCo ---
+            load_pos = data.xpos[body_id]
             # Linear velocity of the load (global frame)
             lin_vel = data.cvel[body_id][3:6]
             # Angular velocity of the load (global frame) -> ADDED THIS
             ang_vel = data.cvel[body_id][0:3]
             # Rotation matrix of the load (global frame)
             rot_mat = data.xmat[body_id].reshape(3, 3)
+
+            lever_arms_global = (rot_mat @ ant_local_pos.T).T 
+            ant_global_positions = load_pos + lever_arms_global
 
             # --- Update Swarm Logic ---
             # The swarm needs to know how the load is moving and rotating to calculate
@@ -207,8 +316,9 @@ def main():
                 dt=model.opt.timestep,
                 load_velocity_global=lin_vel,
                 load_angular_vel=ang_vel,
-                target_direction_global=target_dir,
-                load_rotation_matrix=rot_mat
+                load_rotation_matrix=rot_mat,
+                ant_global_positions=ant_global_positions,
+                ant_local_normals=ant_normals_local
             )
 
             # --- Apply Forces ---            
@@ -286,10 +396,14 @@ def main():
             for i in range(ANT_COUNT):
                 # Only draw arrow if ant is active (applying force)
                 if swarm.states[i] != 0:
+                    if swarm.states[i] == 1:
+                        arrow_color = color_informed
+                    else:
+                        arrow_color = color_puller
                     add_arrow(
                         pos=ant_global_positions[i], 
                         vector=forces_global[i], 
-                        color=[1, 0, 0, 1], 
+                        color=arrow_color, 
                         scale=0.8, 
                         radius=0.008
                     )
