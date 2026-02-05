@@ -23,7 +23,6 @@ class AntSwarm:
 
         self.f_loc = np.zeros((num_sites, 3))
 
-        # <<< CRITICAL FIX >>> Gillespie timer now uses simulation time, not wall-clock time
         self.time_accumulator = 0.0
         self.time_to_next_event = 0.0
         self.event_timer_started = False
@@ -34,7 +33,7 @@ class AntSwarm:
         # Parameters (from Table S5)
         self.k_on = 0.015
         self.k_forget = 0.09
-        self.k_c = 1.0
+        self.k_c = 28
         self.k_off = 0.015
         self.k_orient = 0.7
         self.f_0 = 0.5
