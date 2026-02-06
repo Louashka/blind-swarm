@@ -1,49 +1,97 @@
 import numpy as np
 
+
 class Load:
     def __init__(self) -> None:
-        self.linear_damping = 0
-        self.angular_damping = 0
+        self.linear_damping = 0.0   # gamma (N*s/m in SI terms)
+        self.angular_damping = 0.0  # gamma_rot (N*m*s/rad in SI terms)
+
+
+def _wrap_pi(angle: float) -> float:
+    return (angle + np.pi) % (2 * np.pi) - np.pi
 
 class AntSwarm:
-    def __init__(self, num_sites, attachment_sites_local_pos, puzzle_geometry):
-        """
-        Ant Swarm Logic based on Gelblum et al.
-        """
-        self.num_sites = num_sites
-        self.sites_pos_local = np.array(attachment_sites_local_pos)
-        
+    """
+    Ant swarm model following the Supplementary Notes you provided.
+
+    Key implementation details:
+    - Stores orientation as an angle offset relative to the local outward normal
+      in the *load frame*. This preserves "retain angle w.r.t normal as load moves".
+    - Computes f_loc = gamma(N_att) * v_loc (Eq. 2), where v_loc is in world frame.
+    - Implements Eq. (3) microscopic damping coefficients for both logic and physics.
+    - Implements near-wall detachment + attachment exclusion within epsilon.
+    """
+
+    def __init__(
+        self,
+        num_sites: int,
+        attachment_sites_local_pos_dyn: np.ndarray,  # positions in load frame (planar), used for dynamics
+        attachment_sites_local_normals: np.ndarray,  # normals in load frame (planar)
+        puzzle_geometry: dict,
+        wall_aabbs_2d=None,          # list of (minx, miny, maxx, maxy)
+        eps_wall: float = 0.0005,    # 0.5 mm in meters (paper)
+    ):
+        self.num_sites = int(num_sites)
+        self.sites_pos_local = np.asarray(attachment_sites_local_pos_dyn, dtype=float)
+        self.sites_normals_local = np.asarray(attachment_sites_local_normals, dtype=float)
+
+        assert self.sites_pos_local.shape == (self.num_sites, 3)
+        assert self.sites_normals_local.shape == (self.num_sites, 3)
+
         # State: 0=Empty, 1=Informed Puller, 2=Uninformed Puller, 3=Uninformed Lifter
-        self.states = np.zeros(num_sites, dtype=int) 
-        self.orientations = np.zeros((num_sites, 3))
-        
-        random_angles = np.random.uniform(0, 2*np.pi, num_sites)
-        self.orientations[:, 0] = np.cos(random_angles)
-        self.orientations[:, 1] = np.sin(random_angles)
+        self.states = np.zeros(self.num_sites, dtype=int)
 
-        self.f_loc = np.zeros((num_sites, 3))
+        # Orientation representation: angle offset relative to outward normal (load frame),
+        # constrained to [-phi_max, +phi_max] at (re)orientation events.
+        # Initialize randomly within allowed biomechanical range.
+        self.phi_max = np.deg2rad(52)
+        self.offset_angles = np.random.uniform(-self.phi_max, self.phi_max, self.num_sites)
 
-        self.time_accumulator = 0.0
-        self.time_to_next_event = 0.0
-        self.event_timer_started = False
+        # Cached world-frame vectors (updated each update_logic call)
+        self.p_world = np.zeros((self.num_sites, 3), dtype=float)     # carrier body axis unit vector (world)
+        self.normal_world = np.zeros((self.num_sites, 3), dtype=float)
 
-        # <<< CHANGED >>> Store puzzle geometry
+        # Local force signal (world)
+        self.f_loc = np.zeros((self.num_sites, 3), dtype=float)
+
+        # Wall proximity
+        self.wall_aabbs_2d = wall_aabbs_2d or []
+        self.eps_wall = float(eps_wall)
+        self.blocked = np.zeros(self.num_sites, dtype=bool)
+
+        # Gillespie timer
+        self.time_to_next_event = None  # countdown in seconds; None means "not initialized"
+
+        # Store puzzle geometry (chamber logic for informed)
         self.puzzle_geometry = puzzle_geometry
 
-        # Parameters (from Table S5)
+        # Parameters (Table S5)
         self.k_on = 0.015
         self.k_forget = 0.09
-        self.k_c = 28
+        self.k_c = 1.0
         self.k_off = 0.015
         self.k_orient = 0.7
-        self.f_0 = 0.5
+
+        self.f_0 = 2.8
         self.F_ind = 10 * self.f_0
-        self.phi_max = np.deg2rad(52)
 
         self.gamma_per_ant = 1.48
         self.gamma_rot_per_ant = 1.44
         self.load = Load()
 
+        # Propensity components
+        self.R_att = 0.0
+        self.R_forget = 0.0
+        self.R_c = 0.0
+        self.R_det = 0.0
+        self.R_orient = 0.0
+        self.R_tot = 0.0
+
+        # cached exp weights (for switch event)
+        self.exp_neg = np.ones(self.num_sites)
+        self.exp_pos = np.ones(self.num_sites)
+
+    # --- index sets ---
     @property
     def empty(self) -> np.ndarray:
         return np.where(self.states == 0)[0]
@@ -53,13 +101,13 @@ class AntSwarm:
         return np.where(self.states == 1)[0]
 
     @property
+    def pullers(self) -> np.ndarray:
+        return np.where((self.states == 1) | (self.states == 2))[0]
+
+    @property
     def uninformed(self) -> np.ndarray:
         return np.where((self.states == 2) | (self.states == 3))[0]
 
-    @property
-    def pullers(self) -> np.ndarray:
-        return np.where((self.states == 1) | (self.states == 2))[0]
-    
     @property
     def uninformed_pullers(self) -> np.ndarray:
         return np.where(self.states == 2)[0]
@@ -68,63 +116,129 @@ class AntSwarm:
     def lifters(self) -> np.ndarray:
         return np.where(self.states == 3)[0]
 
-    def calculate_f_loc(self, load_linear_vel, load_angular_vel, load_rotation_matrix):
+    # --- geometry helpers ---
+    def _update_normals_and_p_world(self, load_rotation_matrix: np.ndarray):
         """
-        Calculate f_loc = gamma * v_loc for all sites.
-        v_loc_i = v_cm + omega x r_i
+        Update world-frame outward normals and carrier body-axis vectors p_world
+        from stored offset angles (load-frame relative to normals).
         """
-        # 1. Calculate macroscopic gamma based on N_att (Eq. 3)
-        N_att = np.count_nonzero(self.states)
-        # If N_att is low, friction is high (simulating load touching ground)
-        if N_att <= self.num_sites / 5:
-            self.load.linear_damping = self.gamma_per_ant * self.num_sites
-            self.load.angular_damping = self.gamma_rot_per_ant * self.num_sites
-        else:
-            self.load.linear_damping = self.gamma_per_ant * N_att
-            self.load.angular_damping = self.gamma_rot_per_ant * N_att
+        R = load_rotation_matrix
+        # normals in world
+        self.normal_world = (R @ self.sites_normals_local.T).T
 
-        # 2. Calculate local velocities in Global Frame
-        # r_i_global = R * r_i_local
-        r_global = np.dot(self.sites_pos_local, load_rotation_matrix.T)
-        
-        # angular velocity vector (0, 0, w)
-        omega_vec = np.array([0, 0, load_angular_vel[2]])
-        
-        # v_rot = omega x r
-        v_rot = np.cross(omega_vec, r_global) # Broadcasting works here
-        
-        # v_loc = v_linear + v_rot
-        v_loc = load_linear_vel + v_rot
-        
-        # 3. f_loc = gamma * v_loc
+        # normalize 2D normals and compute their angles
+        n2 = self.normal_world[:, :2]
+        n_norm = np.linalg.norm(n2, axis=1)
+        n_norm = np.where(n_norm < 1e-12, 1.0, n_norm)
+        n2_unit = n2 / n_norm[:, None]
+
+        theta_n = np.arctan2(n2_unit[:, 1], n2_unit[:, 0])
+        theta_p = theta_n + self.offset_angles
+
+        self.p_world[:, 0] = np.cos(theta_p)
+        self.p_world[:, 1] = np.sin(theta_p)
+        self.p_world[:, 2] = 0.0
+
+    # --- wall proximity ---
+    @staticmethod
+    def _point_aabb_distance_2d(xy: np.ndarray, aabb) -> float:
+        x, y = float(xy[0]), float(xy[1])
+        minx, miny, maxx, maxy = aabb
+        dx = max(minx - x, 0.0, x - maxx)
+        dy = max(miny - y, 0.0, y - maxy)
+        return float(np.hypot(dx, dy))
+
+    def _update_blocked_sites(self, ant_global_positions: np.ndarray):
+        """
+        Mark sites within eps of any wall AABB as blocked.
+        """
+        if not self.wall_aabbs_2d:
+            self.blocked[:] = False
+            return
+
+        xy = ant_global_positions[:, :2]
+        blocked = np.zeros(self.num_sites, dtype=bool)
+        for i in range(self.num_sites):
+            dmin = float("inf")
+            for aabb in self.wall_aabbs_2d:
+                d = self._point_aabb_distance_2d(xy[i], aabb)
+                if d < dmin:
+                    dmin = d
+                    if dmin <= self.eps_wall:
+                        break
+            blocked[i] = dmin <= self.eps_wall
+        self.blocked[:] = blocked
+
+    def _apply_wall_detachments(self):
+        """
+        Paper rule: carriers within eps of wall are removed.
+        We apply this to *all* occupied states (including informed).
+        """
+        to_detach = self.blocked & (self.states != 0)
+        if np.any(to_detach):
+            self.states[to_detach] = 0
+            self.offset_angles[to_detach] = 0.0  # reset; value irrelevant while empty
+
+    # --- damping and local signal ---
+    def _update_effective_damping(self):
+        """
+        Implements Eq. (3) for gamma and gamma_rot based on N_att.
+        """
+        N_att = int(np.count_nonzero(self.states))
+        N0 = self.num_sites / 5.0
+
+        if N_att <= N0:
+            self.load.linear_damping = float(self.gamma_per_ant * self.num_sites)
+            self.load.angular_damping = float(self.gamma_rot_per_ant * self.num_sites)
+        else:
+            self.load.linear_damping = float(self.gamma_per_ant * N_att)
+            self.load.angular_damping = float(self.gamma_rot_per_ant * N_att)
+
+    def _calculate_f_loc(self, load_linear_vel_world: np.ndarray, load_angular_vel_world: np.ndarray, load_rotation_matrix: np.ndarray):
+        """
+        f_loc_i = gamma * v_loc_i
+        v_loc_i = v_cm + omega x r_i
+        where r_i is site position relative to COM in world.
+        """
+        self._update_effective_damping()
+
+        # r_global = R * r_local
+        r_global = (load_rotation_matrix @ self.sites_pos_local.T).T
+
+        omega = np.array([0.0, 0.0, float(load_angular_vel_world[2])])
+        v_rot = np.cross(omega, r_global)
+        v_loc = load_linear_vel_world + v_rot
+
         self.f_loc = self.load.linear_damping * v_loc
 
-    def calculate_propensities(self):
+    # --- propensities ---
+    def _calculate_propensities(self):
         """
-        Calculate rates for Gillespie algorithm.
+        Compute total propensities (Eqs. 4–9) using current p_world and f_loc,
+        with attachment excluded on blocked sites.
         """
-        N_empty = len(self.empty)
+        # Attachment: only empty AND not blocked
+        empty_and_allowed = np.where((self.states == 0) & (~self.blocked))[0]
+        N_empty_allowed = len(empty_and_allowed)
+
         N_info = len(self.informed)
         N_uninfo = len(self.uninformed)
         N_p_total = len(self.pullers)
 
-        self.R_att = self.k_on * N_empty
+        self.R_att = self.k_on * N_empty_allowed
         self.R_forget = self.k_forget * N_info
 
-        # Role Switching Rates (Eq. 6)
-        # Calculate dot product (p_i . f_loc / F_ind)
-        dot_prod = np.sum(self.orientations * self.f_loc, axis=1) / self.F_ind
-        
-        # Store exponentials for use in event selection later
-        self.exp_neg = np.exp(-dot_prod) # Favors becoming Lifter
-        self.exp_pos = np.exp(dot_prod)  # Favors becoming Puller
-        
-        # Sum rates only for active uninformed ants
-        # Pullers switch to lifters with rate proportional to exp_neg
-        # Lifters switch to pullers with rate proportional to exp_pos
-        rate_p_to_l = np.sum(self.exp_neg[self.uninformed_pullers])
-        rate_l_to_p = np.sum(self.exp_pos[self.lifters])
-        
+        # Role switching (Eq. 6): weights depend on p_i · f_loc / F_ind
+        dot_prod = np.sum(self.p_world * self.f_loc, axis=1) / self.F_ind
+
+        self.exp_neg = np.exp(-dot_prod)
+        self.exp_pos = np.exp(+dot_prod)
+
+        u_pullers = self.uninformed_pullers
+        u_lifters = self.lifters
+
+        rate_p_to_l = float(np.sum(self.exp_neg[u_pullers])) if len(u_pullers) else 0.0
+        rate_l_to_p = float(np.sum(self.exp_pos[u_lifters])) if len(u_lifters) else 0.0
         self.R_c = self.k_c * (rate_p_to_l + rate_l_to_p)
 
         self.R_det = self.k_off * N_uninfo
@@ -134,152 +248,193 @@ class AntSwarm:
 
     def _execute_switch_event(self):
         """
-        Selects which specific ant switches role based on weights.
+        Select which specific uninformed ant switches role, weighted by Eq. (1)/(6).
         """
         u_pullers = self.uninformed_pullers
         u_lifters = self.lifters
-        
-        # Weights
-        w_p2l = self.exp_neg[u_pullers]
-        w_l2p = self.exp_pos[u_lifters]
-        
-        sum_p2l = np.sum(w_p2l)
-        sum_l2p = np.sum(w_l2p)
-        total_weight = sum_p2l + sum_l2p
-        
-        if total_weight == 0: return
 
-        r = np.random.uniform(0, total_weight)
-        
+        if len(u_pullers) == 0 and len(u_lifters) == 0:
+            return None
+
+        w_p2l = self.exp_neg[u_pullers] if len(u_pullers) else np.array([])
+        w_l2p = self.exp_pos[u_lifters] if len(u_lifters) else np.array([])
+
+        sum_p2l = float(np.sum(w_p2l)) if w_p2l.size else 0.0
+        sum_l2p = float(np.sum(w_l2p)) if w_l2p.size else 0.0
+        total = sum_p2l + sum_l2p
+        if total <= 0.0:
+            return None
+
+        r = np.random.uniform(0.0, total)
         if r < sum_p2l:
-            # A puller becomes a lifter
-            # Sample index from u_pullers based on w_p2l
             cumsum = np.cumsum(w_p2l)
-            idx_in_subset = np.searchsorted(cumsum, r)
-            global_idx = u_pullers[min(idx_in_subset, len(u_pullers)-1)]
-            self.states[global_idx] = 3
-            is_puller = False
+            idx_in_subset = int(np.searchsorted(cumsum, r, side="right"))
+            idx_in_subset = min(idx_in_subset, len(u_pullers) - 1)
+            global_idx = int(u_pullers[idx_in_subset])
+            self.states[global_idx] = 3  # puller -> lifter
+            return global_idx
         else:
-            # A lifter becomes a puller
             r -= sum_p2l
             cumsum = np.cumsum(w_l2p)
-            idx_in_subset = np.searchsorted(cumsum, r)
-            global_idx = u_lifters[min(idx_in_subset, len(u_lifters)-1)]
-            self.states[global_idx] = 2
-            is_puller = True
+            idx_in_subset = int(np.searchsorted(cumsum, r, side="right"))
+            idx_in_subset = min(idx_in_subset, len(u_lifters) - 1)
+            global_idx = int(u_lifters[idx_in_subset])
+            self.states[global_idx] = 2  # lifter -> puller
+            return global_idx
 
-        return global_idx, is_puller
-
-    def reorient_ant(self, idx, load_rotation_matrix, ant_global_pos, ant_local_normal):
+    # --- reorientation ---
+    def reorient_ant(self, idx: int, load_rotation_matrix: np.ndarray, ant_global_pos: np.ndarray, ant_local_normal: np.ndarray):
         """
-        Updates orientation p_i for ant idx.
-        Implements chamber-based logic for informed pullers.
+        Update offset angle relative to outward normal, clamped to phi_max,
+        towards desired direction (informed: chamber target; uninformed: f_loc direction).
         """
-        # 1. Determine Desired Direction
-        if self.states[idx] == 1: # Informed Puller
-            ant_x = ant_global_pos[0]
-            
-            # Check which chamber the ant is in based on its global X position
-            if ant_x < self.puzzle_geometry['chamber1_x_boundary']:
-                # Chamber 1: Pull towards slit 1 midpoint
-                target_pos = self.puzzle_geometry['slit1_midpoint']
-                desired_dir = target_pos - ant_global_pos
-            elif ant_x < self.puzzle_geometry['chamber2_x_boundary']:
-                # Chamber 2: Pull towards slit 2 midpoint
-                target_pos = self.puzzle_geometry['slit2_midpoint']
-                desired_dir = target_pos - ant_global_pos
-            else:
-                # Chamber 3: Pull along the global target direction (+x)
-                desired_dir = np.array([1.0, 0.0, 0.0]) 
-            
-            # Normalize the calculated direction
-            norm = np.linalg.norm(desired_dir)
-            if norm > 1e-6:
-                desired_dir = desired_dir / norm
+        idx = int(idx)
 
-        elif self.states[idx] == 2: # Uninformed Puller
-            f_mag = np.linalg.norm(self.f_loc[idx])
-            if f_mag > 1e-6:
-                desired_dir = self.f_loc[idx] / f_mag
+        # Determine desired direction (world)
+        if self.states[idx] == 1:  # Informed puller
+            ant_x = float(ant_global_pos[0])
+            if ant_x < self.puzzle_geometry["chamber1_x_boundary"]:
+                target_pos = self.puzzle_geometry["slit1_midpoint"]
+                desired = target_pos - ant_global_pos
+            elif ant_x < self.puzzle_geometry["chamber2_x_boundary"]:
+                target_pos = self.puzzle_geometry["slit2_midpoint"]
+                desired = target_pos - ant_global_pos
             else:
-                return # No change if local force is zero
+                desired = np.array([1.0, 0.0, 0.0], dtype=float)
+        elif self.states[idx] == 2:  # Uninformed puller
+            f = self.f_loc[idx]
+            nrm = float(np.linalg.norm(f))
+            if nrm < 1e-9:
+                return
+            desired = f / nrm
         else:
-            return # Not a puller, no reorientation needed
+            return  # lifter/empty do not reorient
 
-        # 2. Calculate Local Normal in Global Frame
-        normal_global = np.dot(load_rotation_matrix, ant_local_normal)
+        # Normalize desired (2D)
+        d2 = desired[:2]
+        dn = float(np.linalg.norm(d2))
+        if dn < 1e-9:
+            return
+        d2 = d2 / dn
+        theta_d = float(np.arctan2(d2[1], d2[0]))
 
-        # 3. Apply Angular Limit (phi_max)
-        normal_2d = normal_global[:2]
-        desired_2d = desired_dir[:2]
-        
-        theta_n = np.arctan2(normal_2d[1], normal_2d[0])
-        theta_d = np.arctan2(desired_2d[1], desired_2d[0])
-        
-        diff = (theta_d - theta_n + np.pi) % (2 * np.pi) - np.pi
-        
-        if diff > self.phi_max: final_angle = theta_n + self.phi_max
-        elif diff < -self.phi_max: final_angle = theta_n - self.phi_max
-        else: final_angle = theta_d
-            
-        self.orientations[idx] = np.array([np.cos(final_angle), np.sin(final_angle), 0])
+        # Outward normal in world (2D)
+        n_world = (load_rotation_matrix @ ant_local_normal)[:2]
+        nn = float(np.linalg.norm(n_world))
+        if nn < 1e-9:
+            return
+        n_world = n_world / nn
+        theta_n = float(np.arctan2(n_world[1], n_world[0]))
 
-    def update_logic(self, dt, load_velocity_global, load_angular_vel, load_rotation_matrix, ant_global_positions, ant_local_normals):
-        self.calculate_f_loc(load_velocity_global, load_angular_vel, load_rotation_matrix)
-        
-        # <<< CRITICAL FIX >>> Correct Gillespie timer logic
-        self.time_accumulator += dt
-        
-        # Process all events that should have occurred in the last time step
-        while self.time_accumulator >= self.time_to_next_event:
-            # Decrement accumulator by the time of the event we are processing
-            self.time_accumulator -= self.time_to_next_event
-            
-            self.calculate_propensities()
-            if self.R_tot <= 1e-9:
-                self.time_to_next_event = float('inf') # No events can happen
+        diff = _wrap_pi(theta_d - theta_n)
+        diff = float(np.clip(diff, -self.phi_max, +self.phi_max))
+
+        self.offset_angles[idx] = diff
+
+    # --- main update ---
+    def update_logic(
+        self,
+        dt: float,
+        load_velocity_world: np.ndarray,       # linear velocity of COM (world)
+        load_angular_vel_world: np.ndarray,    # angular velocity (world)
+        load_rotation_matrix: np.ndarray,
+        ant_global_positions: np.ndarray,
+    ):
+        """
+        Updates swarm (Gillespie events) and returns per-site pulling forces in world frame.
+
+        This function:
+        1) applies near-wall detachment and blocks near-wall attachments
+        2) updates p_world from stored offset angles and current load rotation
+        3) updates f_loc from v_loc and gamma(N_att)
+        4) advances Gillespie events in a "countdown" fashion over dt
+        5) returns forces for current pullers
+        """
+        dt = float(dt)
+
+        # Wall proximity bookkeeping
+        self._update_blocked_sites(ant_global_positions)
+        self._apply_wall_detachments()
+
+        # Update p_world and f_loc for current continuous state
+        self._update_normals_and_p_world(load_rotation_matrix)
+        self._calculate_f_loc(load_velocity_world, load_angular_vel_world, load_rotation_matrix)
+        self._calculate_propensities()
+
+        # Initialize or refresh event timer
+        if self.R_tot <= 1e-12:
+            self.time_to_next_event = float("inf")
+        elif self.time_to_next_event is None or not np.isfinite(self.time_to_next_event):
+            self.time_to_next_event = -np.log(np.random.rand()) / self.R_tot
+
+        # Advance time by dt, firing all events that occur within dt
+        self.time_to_next_event -= dt
+
+        while self.time_to_next_event <= 0.0:
+            # Recompute propensities at the event time (states may have changed)
+            self._update_normals_and_p_world(load_rotation_matrix)
+            self._calculate_f_loc(load_velocity_world, load_angular_vel_world, load_rotation_matrix)
+            self._calculate_propensities()
+
+            if self.R_tot <= 1e-12:
+                self.time_to_next_event = float("inf")
                 break
 
-            r_2 = np.random.rand() * self.R_tot
-            
-            if r_2 < self.R_att:
-                if len(self.empty) > 0:
-                    idx = np.random.choice(self.empty)
-                    self.states[idx] = 1 # Becomes Informed
-                    # <<< CHANGED >>> Pass the ant's global position for correct initial orientation
-                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], ant_local_normals[idx])
-            elif r_2 < self.R_att + self.R_forget:
-                if len(self.informed) > 0:
-                    idx = np.random.choice(self.informed)
-                    dot_val = np.dot(self.orientations[idx], self.f_loc[idx]) / self.F_ind
-                    prob_puller = 1.0 / (1.0 + np.exp(-2 * dot_val))
-                    self.states[idx] = 2 if np.random.rand() < prob_puller else 3
-            elif r_2 < self.R_att + self.R_forget + self.R_c:
-                if len(self.uninformed) > 0:
-                    # Simplified role switching logic from your code
-                    # idx = np.random.choice(self.uninformed)
-                    # self.states[idx] = 3 if self.states[idx] == 2 else 2
-                    _, _ = self._execute_switch_event()
-            elif r_2 < self.R_att + self.R_forget + self.R_c + self.R_det:
-                if len(self.uninformed) > 0:
-                    idx = np.random.choice(self.uninformed)
+            r2 = np.random.rand() * self.R_tot
+
+            # --- Attachment (allowed empty only) ---
+            if r2 < self.R_att:
+                candidates = np.where((self.states == 0) & (~self.blocked))[0]
+                if len(candidates) > 0:
+                    idx = int(np.random.choice(candidates))
+                    self.states[idx] = 1
+                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], self.sites_normals_local[idx])
+
+            # --- Forgetting ---
+            elif r2 < self.R_att + self.R_forget:
+                infos = self.informed
+                if len(infos) > 0:
+                    idx = int(np.random.choice(infos))
+                    # Eq. (14) uses p_i · f_loc / F_ind
+                    dot_val = float(np.dot(self.p_world[idx], self.f_loc[idx]) / self.F_ind)
+                    prob_puller = 1.0 / (1.0 + np.exp(-2.0 * dot_val))
+                    self.states[idx] = 2 if (np.random.rand() < prob_puller) else 3
+
+            # --- Role switching ---
+            elif r2 < self.R_att + self.R_forget + self.R_c:
+                self._execute_switch_event()
+
+            # --- Detachment (uninformed only) ---
+            elif r2 < self.R_att + self.R_forget + self.R_c + self.R_det:
+                uninf = self.uninformed
+                if len(uninf) > 0:
+                    idx = int(np.random.choice(uninf))
                     self.states[idx] = 0
-                    self.orientations[idx] = 0
-            else:
-                if len(self.pullers) > 0:
-                    idx = np.random.choice(self.pullers)
-                    # <<< CHANGED >>> Pass the ant's global position for reorientation
-                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], ant_local_normals[idx])
+                    self.offset_angles[idx] = 0.0
 
-            # Calculate time until the *next* event
-            if self.R_tot > 1e-9:
-                self.time_to_next_event = -np.log(np.random.rand()) / self.R_tot
+            # --- Reorientation (pullers only) ---
             else:
-                self.time_to_next_event = float('inf')
+                pullers = self.pullers
+                if len(pullers) > 0:
+                    idx = int(np.random.choice(pullers))
+                    self.reorient_ant(idx, load_rotation_matrix, ant_global_positions[idx], self.sites_normals_local[idx])
 
-        # Return forces to be applied to the physics engine
-        forces = np.zeros_like(self.orientations)
-        forces[self.pullers] = self.orientations[self.pullers] * self.f_0
+            # Draw next event time and carry over negative remainder
+            self._update_normals_and_p_world(load_rotation_matrix)
+            self._calculate_f_loc(load_velocity_world, load_angular_vel_world, load_rotation_matrix)
+            self._calculate_propensities()
+
+            if self.R_tot <= 1e-12:
+                self.time_to_next_event = float("inf")
+                break
+
+            tau = -np.log(np.random.rand()) / self.R_tot
+            self.time_to_next_event += tau
+
+        # Forces in world: only pullers contribute; lifters = 0
+        self._update_normals_and_p_world(load_rotation_matrix)
+        forces = np.zeros_like(self.p_world)
+        pullers = self.pullers
+        if len(pullers) > 0:
+            forces[pullers] = self.p_world[pullers] * self.f_0
         return forces
-
-    
