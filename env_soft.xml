@@ -13,6 +13,11 @@
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"/>
   </asset>
 
+  <!-- <equality> -->
+      <!-- Connect site1 on body1 to site2 on body2 -->
+      <!-- <connect body1="link1" body2="link2" anchor="0.21025 0 0"/> -->
+    <!-- </equality> -->
+
   <worldbody>
     <!-- Floor -->
     <geom name="floor" size="10 10 0.05" type="plane" material="groundplane" contype="1" conaffinity="1"/>
@@ -33,47 +38,31 @@
 
 
     <!-- ====================================================================== -->
-    <!-- THE T-SHAPED LOAD - Now with an articulated cross-bar                -->
+    <!-- THE T-SHAPED LOAD - Based on Table S1 "small ant (exp)" dimensions     -->
+    <!-- All dimensions from cm -> m.                                           -->
     <!-- ====================================================================== -->
+
+    <!-- The T-Shape Geometry (using half-extents for 'size') -->
+    <!-- First link -->
     <body name="load" pos="0.65 0 0.0295">
-      <!-- 
-        PLANAR JOINTS: These restrict movement to 2D (x, y, z-rotation).
-        Damping is set to 0 to match the paper's model (Eq. 3), 
-        where damping forces will be applied manually in python.
-      -->
-      <joint name="slide_x" type="slide" axis="1 0 0" damping="10"/>
-      <joint name="slide_y" type="slide" axis="0 1 0" damping="10"/>
-      <joint name="hinge_z" type="hinge" axis="0 0 1" damping="10"/>
-
-      <!-- The T-Shape's main components -->
-      <geom name="main_bar" type="box" size="0.4205 0.0295 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
-      <geom name="short_bar" type="box" pos="0.4205 0 0" size="0.0295 0.1095 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
-
-      <!-- ====================================================================== -->
-      <!-- ARTICULATED LONG BAR - Divided into two bodies connected by a hinge    -->
-      <!-- ====================================================================== -->
-      <!-- The original long_bar geom has been removed. -->
-      <!-- It is replaced by this hierarchy of bodies and joints. -->
-
-      <!-- PART 1: The first half of the long bar. It is a child of the main 'load' body. -->
-      <!-- Position: Original x-pos, but y-pos is shifted to center this new, shorter piece. -->
-      <body name="long_bar_part1" pos="-0.4205 -0.11475 0">
-        <!-- Geom for part 1. Size is half the original y-size. -->
-        <geom name="long_bar_geom1" type="box" size="0.0295 0.11475 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
-
-        <!-- HINGE JOINT: Connects part1 to part2. -->
-        <!-- Position is at the end of part1, which is the center of the original long_bar. -->
-        <!-- Axis allows rotation "flapping" up and down. -->
-        <joint name="hinge_long_bar" type="hinge" axis="1 0 0" pos="0 0.11475 0" damping="0.1"/>
-
-        <!-- PART 2: The second half of the long bar. It is a child of 'long_bar_part1'. -->
-        <!-- Position is relative to part1's origin, placing its center correctly. -->
-        <body name="long_bar_part2" pos="0 0.2295 0">
-          <!-- Geom for part 2. Centered within its own body frame. -->
-          <geom name="long_bar_geom2" type="box" size="0.0295 0.11475 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
-        </body>
+      <joint name="link1_planar" type="slide" axis="1 0 0" damping="10"/>
+      <joint name="link1_slide_y" type="slide" axis="0 1 0" damping="10"/>
+      <joint name="link1_rotation" type="hinge" axis="0 0 1" damping="10"/>
+      
+      <!-- long crossbar: length=0.58, width=0.09. size = [0.29, 0.045, 0.05] -->
+      <geom name="long_bar" type="box" pos="-0.4205 0 0" size="0.0295 0.2295 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>
+      <geom name="link1_geom" type="box" size="0.1955 0.0295 0.0295" pos="-0.1955 0 0" rgba="0.8 0.2 0.2 1" density="50"/>
+      
+      <!-- Second link connected to the first -->
+      <body name="link2" pos="0 0 0">
+        <joint name="link2_hinge" type="hinge" axis="0 0 1" pos="0 0 0" limited="true" range="-100 100"/>
+        <geom name="link2_geom" type="box" size="0.1955 0.0295 0.0295" pos="0.1955 0 0" rgba="0.8 0.2 0.2 1" density="50"/>    
+        <!-- short crossbar: length=0.29, width=0.09. size = [0.0045, 0.0145, 0.01] -->
+        <!-- Positioned relative to the long_bar's center to form a T -->
+        <geom name="short_bar" type="box" pos="0.4205 0 0" size="0.0295 0.1095 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>    
       </body>
     </body>
 
   </worldbody>
 </mujoco>
+

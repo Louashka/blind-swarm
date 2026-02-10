@@ -428,7 +428,7 @@ def main():
                             pos=ant_global_positions[i],
                             vector=forces_world[i],
                             color=arrow_color,
-                            scale=0.8,
+                            scale=0.2,
                             radius=0.008,
                         )
 

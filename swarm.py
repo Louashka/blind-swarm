@@ -72,7 +72,7 @@ class AntSwarm:
         self.k_off = 0.015
         self.k_orient = 0.7
 
-        self.f_0 = 2.8
+        self.f_0 = 1.0
         self.F_ind = 10 * self.f_0
 
         self.gamma_per_ant = 1.48
