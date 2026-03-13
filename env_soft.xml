@@ -13,11 +13,6 @@
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5"/>
   </asset>
 
-  <!-- <equality> -->
-      <!-- Connect site1 on body1 to site2 on body2 -->
-      <!-- <connect body1="link1" body2="link2" anchor="0.21025 0 0"/> -->
-    <!-- </equality> -->
-
   <worldbody>
     <!-- Floor -->
     <geom name="floor" size="10 10 0.05" type="plane" material="groundplane" contype="1" conaffinity="1"/>
@@ -41,13 +36,11 @@
     <!-- THE T-SHAPED LOAD - Based on Table S1 "small ant (exp)" dimensions     -->
     <!-- All dimensions from cm -> m.                                           -->
     <!-- ====================================================================== -->
-
-    <!-- The T-Shape Geometry (using half-extents for 'size') -->
     <!-- First link -->
     <body name="load" pos="0.65 0 0.0295">
-      <joint name="link1_planar" type="slide" axis="1 0 0" damping="10"/>
-      <joint name="link1_slide_y" type="slide" axis="0 1 0" damping="10"/>
-      <joint name="link1_rotation" type="hinge" axis="0 0 1" damping="10"/>
+      <joint name="slide_x" type="slide" axis="1 0 0" damping="0"/>
+      <joint name="slide_y" type="slide" axis="0 1 0" damping="0"/>
+      <joint name="hinge_z" type="hinge" axis="0 0 1" damping="0"/>
       
       <!-- long crossbar: length=0.58, width=0.09. size = [0.29, 0.045, 0.05] -->
       <geom name="long_bar" type="box" pos="-0.4205 0 0" size="0.0295 0.2295 0.0295" rgba="0.8 0.2 0.2 1" density="50"/>

@@ -366,9 +366,11 @@ def main():
                 model.dof_damping[dof_x] = swarm.load.linear_damping
                 model.dof_damping[dof_y] = swarm.load.linear_damping
                 model.dof_damping[dof_r] = swarm.load.angular_damping
+                print("Damping: ", swarm.load.linear_damping)
 
                 # Net ant force and torque about COM
                 net_force = np.sum(forces_world, axis=0)
+                print("Force: ", net_force)
                 torques = np.cross(r_world, forces_world)
                 net_torque = np.sum(torques, axis=0)
 
